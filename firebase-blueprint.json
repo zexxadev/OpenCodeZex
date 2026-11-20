@@ -1,0 +1,246 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated OpenCodeZex user profile metadata for ownership and account display.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the account owner."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Primary email address associated with the signed-in Google account."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name shown in account settings."
+        },
+        "photoUrl": {
+          "type": "string",
+          "description": "Optional Google profile photo URL."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user profile was first created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user profile was last updated."
+        }
+      },
+      "required": ["uid", "email", "displayName", "photoUrl", "createdAt", "updatedAt"]
+    },
+    "AppSettings": {
+      "title": "AppSettings",
+      "description": "User-scoped application configuration including theme preference, active server, selected agent/model, and setup wizard state.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "themePreference": {
+          "type": "string",
+          "enum": ["DARK", "LIGHT", "MATERIAL_GLASS", "MIUIX", "SYSTEM"],
+          "description": "Selected visual theme preference."
+        },
+        "activeProfileId": {
+          "type": "string",
+          "description": "ID of the currently active server profile."
+        },
+        "selectedAgent": {
+          "type": "string",
+          "description": "Selected OpenCode agent name."
+        },
+        "selectedProviderId": {
+          "type": "string",
+          "description": "ID of the active AI provider."
+        },
+        "selectedModelId": {
+          "type": "string",
+          "description": "ID of the active AI model."
+        },
+        "setupCompleted": {
+          "type": "boolean",
+          "description": "Whether initial setup onboarding has been completed."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when settings were created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when settings were last updated."
+        }
+      },
+      "required": [
+        "userId",
+        "themePreference",
+        "activeProfileId",
+        "selectedAgent",
+        "selectedProviderId",
+        "selectedModelId",
+        "setupCompleted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ServerProfileConfig": {
+      "title": "ServerProfileConfig",
+      "description": "User-scoped server connection profile (local Android runtime, Termux, LAN, or remote OpenCode server).",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable name of the server profile."
+        },
+        "baseUrl": {
+          "type": "string",
+          "description": "Normalized server URL or local://android URI."
+        },
+        "username": {
+          "type": "string",
+          "description": "Optional server authentication username."
+        },
+        "password": {
+          "type": "string",
+          "description": "Optional server authentication password or token."
+        },
+        "directory": {
+          "type": "string",
+          "description": "Default remote workspace directory path."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["LOCAL_ANDROID", "REMOTE_SERVER"],
+          "description": "Runtime mode indicating built-in Android runtime or remote server."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was last updated."
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "baseUrl",
+        "username",
+        "password",
+        "directory",
+        "mode",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProviderAccountConfig": {
+      "title": "ProviderAccountConfig",
+      "description": "User-scoped AI provider configuration including custom endpoint URL, API key, format, default model, and cached models.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "providerId": {
+          "type": "string",
+          "description": "Canonical provider identifier."
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the AI provider."
+        },
+        "baseUrl": {
+          "type": "string",
+          "description": "Base endpoint URL for the provider API."
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "User-supplied API key stored privately under their user subtree."
+        },
+        "defaultModelId": {
+          "type": "string",
+          "description": "Default model ID selected for this provider."
+        },
+        "apiFormat": {
+          "type": "string",
+          "enum": ["OPENAI_COMPATIBLE", "ANTHROPIC", "GEMINI"],
+          "description": "Protocol format expected by the provider endpoint."
+        },
+        "envVarName": {
+          "type": "string",
+          "description": "Environment variable name used when syncing to OpenCode servers."
+        },
+        "customFlag": {
+          "type": "boolean",
+          "description": "True if this provider was added manually by the user."
+        },
+        "cachedModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Cached model IDs available for this provider."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the provider account was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the provider account was last updated."
+        }
+      },
+      "required": [
+        "userId",
+        "providerId",
+        "name",
+        "baseUrl",
+        "apiKey",
+        "defaultModelId",
+        "apiFormat",
+        "envVarName",
+        "customFlag",
+        "cachedModels",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profile document owned by the signed-in user."
+    },
+    "/users/{userId}/app_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppSettings" },
+      "description": "User-scoped OpenCodeZex app settings and active selections."
+    },
+    "/users/{userId}/server_profiles/{profileId}": {
+      "schema": { "$ref": "#/entities/ServerProfileConfig" },
+      "description": "User-scoped saved server profiles."
+    },
+    "/users/{userId}/provider_accounts/{accountId}": {
+      "schema": { "$ref": "#/entities/ProviderAccountConfig" },
+      "description": "User-scoped AI provider endpoints, API keys, and cached models."
+    }
+  }
+}

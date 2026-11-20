@@ -16,6 +16,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
+import com.example.data.firebase.AppSettingsDoc
+import com.example.data.firebase.ProviderAccountDoc
+import com.example.data.firebase.ServerProfileDoc
+import com.example.data.firebase.sanitizeFirestoreDocId
 import com.example.data.model.ChatMessage
 import com.example.data.model.LocalProviderConfig
 import com.example.data.model.MessagePart
@@ -26,12 +30,16 @@ import com.example.data.preferences.ServerProfileStore
 import com.example.data.repository.DataStoreProviderConfigRepository
 import com.example.ui.components.ThemeSelectorCard
 import com.example.ui.components.ThemeToggleButton
+import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.ModelSelectorSheetContent
 import com.example.ui.screens.ProviderApiKeyDialogContent
 import com.example.ui.screens.ServersScreen
+import com.example.ui.screens.SplashPhase
+import com.example.ui.screens.SplashScreen
 import com.example.ui.theme.OpenCodeTheme
 import com.example.ui.theme.ThemePreference
+import com.example.ui.viewmodel.CloudSyncStatus
 import com.example.ui.viewmodel.ComposerMode
 import com.example.ui.viewmodel.FailedPromptRequest
 import com.example.ui.viewmodel.OpenCodeUiState
@@ -70,7 +78,8 @@ class ExampleRobolectricTest {
     fun `read string from context`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
-        assertEquals("OpenCode", appName)
+        assertEquals("OpenCodeZex", appName)
+        assertEquals("com.opencodezex.app", context.packageName)
     }
 
     @Test
@@ -597,5 +606,130 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("dialog_preset_google").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithText("https://aistudio.google.com/apikey", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun `firestoreModels sanitize ids and convert POJOs accurately`() {
+        assertEquals("custom_api_v1", sanitizeFirestoreDocId("custom.api/v1"))
+        assertEquals("default_id", sanitizeFirestoreDocId("   "))
+
+        val providerDoc = ProviderAccountDoc(
+            id = "ollama_lan",
+            userId = "uid123",
+            providerId = "ollama_lan",
+            name = "Ollama LAN",
+            baseUrl = "http://192.168.1.50:11434/v1",
+            apiKey = "tok",
+            defaultModelId = "qwen3-coder",
+            apiFormat = "OPENAI_COMPATIBLE",
+            envVarName = "OLLAMA_API_KEY",
+            customFlag = true,
+            cachedModels = listOf("qwen3-coder")
+        )
+        val account = providerDoc.toSavedProviderAccount()
+        assertTrue(account.isCustom)
+        assertEquals("ollama_lan", account.id)
+        assertEquals(ProviderApiFormat.OPENAI_COMPATIBLE, account.apiFormat)
+
+        val settingsDoc = AppSettingsDoc(
+            id = "preferences",
+            userId = "uid123",
+            themePreference = "MATERIAL_GLASS"
+        )
+        assertEquals(ThemePreference.MATERIAL_GLASS, settingsDoc.toThemePreference())
+
+        val serverDoc = ServerProfileDoc(
+            id = "local-android",
+            userId = "uid123",
+            name = "Lokal",
+            baseUrl = "local://android",
+            mode = "LOCAL_ANDROID"
+        )
+        assertTrue(serverDoc.toServerProfile().isLocalAndroid)
+    }
+
+    @Test
+    @Config(sdk = [36], qualifiers = "w411dp-h891dp")
+    fun `authScreen displays Google sign in CTA and triggers callback`() {
+        var clicked = false
+        composeTestRule.setContent {
+            OpenCodeTheme(themePreference = ThemePreference.DARK) {
+                AuthScreen(
+                    isSigningIn = false,
+                    errorMessage = "Percobaan error autentikasi",
+                    themePreference = ThemePreference.DARK,
+                    onThemeChange = {},
+                    onGoogleSignInClick = { clicked = true }
+                )
+            }
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Percobaan error autentikasi").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("google_sign_in_button").assertIsDisplayed().performClick()
+        assertTrue(clicked)
+    }
+
+    @Test
+    @Config(sdk = [36], qualifiers = "w411dp-h891dp")
+    fun `serversScreen renders CloudAccountSecurityCard with sync and sign out buttons`() {
+        var syncClicked = false
+        var signOutClicked = false
+        composeTestRule.setContent {
+            OpenCodeTheme(themePreference = ThemePreference.DARK) {
+                ServersScreen(
+                    state = OpenCodeUiState(
+                        authenticatedUserId = "uid_alice",
+                        authenticatedUserName = "Alice",
+                        authenticatedUserEmail = "alice@example.com",
+                        cloudSyncStatus = CloudSyncStatus.Synced()
+                    ),
+                    onTestConnection = {},
+                    onActivateProfile = {},
+                    onSaveProfile = {},
+                    onDeleteProfile = {},
+                    onThemeChange = {},
+                    onOpenSetupWizard = {},
+                    onSaveProviderApiKey = { _, _, _, _ -> },
+                    onSyncCloud = { syncClicked = true },
+                    onSignOut = { signOutClicked = true }
+                )
+            }
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Alice").assertIsDisplayed()
+        composeTestRule.onNodeWithText("alice@example.com").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Tersinkronisasi ke Firebase Cloud").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("sync_cloud_button").assertIsDisplayed().performClick()
+        composeTestRule.onNodeWithTag("sign_out_button").assertIsDisplayed().performClick()
+        assertTrue(syncClicked)
+        assertTrue(signOutClicked)
+    }
+
+    @Test
+    @Config(sdk = [36], qualifiers = "w411dp-h891dp")
+    fun `splashScreen displays OpenCodeZex branding logo and transitions initialization phases`() {
+        val phase = mutableStateOf(SplashPhase.INITIALIZING_FIREBASE)
+        composeTestRule.setContent {
+            OpenCodeTheme(themePreference = ThemePreference.MATERIAL_GLASS) {
+                SplashScreen(phase = phase.value)
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("splash_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_logo_image").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_brand_title").assertTextContains("OpenCodeZex")
+        composeTestRule.onNodeWithTag("splash_status_label").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Menginisialisasi Firebase", substring = true).assertIsDisplayed()
+
+        phase.value = SplashPhase.CHECKING_SESSION
+        composeTestRule.mainClock.advanceTimeBy(300)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Memeriksa sesi akun", substring = true).assertIsDisplayed()
+
+        phase.value = SplashPhase.SESSION_FOUND
+        composeTestRule.mainClock.advanceTimeBy(300)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Membuka workspace", substring = true).assertIsDisplayed()
     }
 }

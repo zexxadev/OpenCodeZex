@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">OpenCode</string>
+    <string name="app_name">OpenCodeZex</string>
     <string name="nav_sessions">Sesi</string>
     <string name="nav_workspace">Workspace</string>
     <string name="nav_files">File</string>
@@ -39,4 +39,11 @@
     <string name="hint_prompt_command">Ketik argumen slash command…</string>
     <string name="hint_search_sessions">Cari sesi…</string>
     <string name="hint_search_files">Cari nama file atau grep kode…</string>
+
+    <string name="splash_tagline">AI Coding Workspace &amp; Cloud Sync</string>
+    <string name="splash_status_init_firebase">Menginisialisasi Firebase…</string>
+    <string name="splash_status_checking_session">Memeriksa sesi akun…</string>
+    <string name="splash_status_ready">Membuka workspace…</string>
+    <string name="splash_status_auth_required">Menyiapkan halaman masuk…</string>
+    <string name="splash_logo_description">Logo OpenCodeZex</string>
 </resources>

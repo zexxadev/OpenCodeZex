@@ -3,7 +3,12 @@ package com.example.ui.viewmodel
 import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.data.firebase.CloudAppSettings
+import com.example.data.firebase.CloudConfigSyncRepository
+import com.example.data.firebase.NoOpCloudConfigSyncRepository
 import com.example.data.local.LocalLlmClient
 import com.example.data.local.LocalOpenCodeRuntime
 import com.example.data.local.LocalWorkspaceManager
@@ -36,8 +41,11 @@ import com.example.data.repository.ApiOutcome
 import com.example.data.repository.DataStoreProviderConfigRepository
 import com.example.data.repository.OpenCodeRepository
 import com.example.ui.theme.ThemePreference
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -55,6 +63,13 @@ sealed interface ConnectionState {
     data object Connecting : ConnectionState
     data class Connected(val version: String, val latencyMs: Long) : ConnectionState
     data class Error(val diagnostic: DiagnosticError) : ConnectionState
+}
+
+sealed interface CloudSyncStatus {
+    data object Idle : CloudSyncStatus
+    data object Syncing : CloudSyncStatus
+    data class Synced(val lastSyncedAtMs: Long = System.currentTimeMillis()) : CloudSyncStatus
+    data class Error(val message: String) : CloudSyncStatus
 }
 
 enum class ComposerMode(val label: String) {
@@ -127,7 +142,11 @@ data class OpenCodeUiState(
     val isRefreshingModels: Boolean = false,
     val localProviderConfig: LocalProviderConfig = LocalProviderConfig(),
     val providerAccounts: List<SavedProviderAccount> = ProviderCatalogDefaults.defaultAccounts(),
-    val localWorkspacePath: String = ""
+    val localWorkspacePath: String = "",
+    val authenticatedUserId: String? = null,
+    val authenticatedUserEmail: String? = null,
+    val authenticatedUserName: String? = null,
+    val cloudSyncStatus: CloudSyncStatus = CloudSyncStatus.Idle
 ) {
     val shouldShowSetupWizard: Boolean
         get() = showSetupWizardManual || hasCompletedSetup == false
@@ -154,7 +173,34 @@ data class OpenCodeUiState(
         }
 }
 
-class OpenCodeViewModel(application: Application) : AndroidViewModel(application) {
+class OpenCodeViewModel(
+    application: Application,
+    private val currentUserId: String? = null,
+    private val authenticatedEmail: String? = null,
+    private val authenticatedDisplayName: String? = null,
+    private val cloudSyncRepository: CloudConfigSyncRepository = NoOpCloudConfigSyncRepository
+) : AndroidViewModel(application) {
+
+    companion object {
+        fun provideFactory(
+            application: Application,
+            userId: String?,
+            email: String?,
+            displayName: String?,
+            cloudSyncRepository: CloudConfigSyncRepository
+        ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return OpenCodeViewModel(
+                    application = application,
+                    currentUserId = userId,
+                    authenticatedEmail = email,
+                    authenticatedDisplayName = displayName,
+                    cloudSyncRepository = cloudSyncRepository
+                ) as T
+            }
+        }
+    }
 
     private val clientManager = OpenCodeClientManager()
     private val sseClient = OpenCodeSseClient(clientManager.json)
@@ -171,7 +217,13 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
         localRuntime = localRuntime
     )
 
-    private val _uiState = MutableStateFlow(OpenCodeUiState())
+    private val _uiState = MutableStateFlow(
+        OpenCodeUiState(
+            authenticatedUserId = currentUserId,
+            authenticatedUserEmail = authenticatedEmail,
+            authenticatedUserName = authenticatedDisplayName
+        )
+    )
     val uiState: StateFlow<OpenCodeUiState> = _uiState.asStateFlow()
 
     private val _snackbarEvents = MutableSharedFlow<String>(extraBufferCapacity = 8)
@@ -240,6 +292,183 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
                 ) {
                     initializedConnection = true
                     connectToActiveServer(snap.active)
+                }
+            }
+        }
+
+        if (!currentUserId.isNullOrBlank()) {
+            startCloudConfigSync(currentUserId)
+        }
+    }
+
+    private fun startCloudConfigSync(uid: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(cloudSyncStatus = CloudSyncStatus.Syncing) }
+            val hasRemote = cloudSyncRepository.hasRemoteSettings(uid)
+            if (hasRemote.isSuccess && hasRemote.getOrDefault(false) == false) {
+                pushFullConfigToCloudInternal(silent = true)
+            } else if (hasRemote.isFailure) {
+                _uiState.update {
+                    it.copy(
+                        cloudSyncStatus = CloudSyncStatus.Error(
+                            hasRemote.exceptionOrNull()?.message ?: "Gagal memeriksa konfigurasi cloud"
+                        )
+                    )
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            cloudSyncRepository.observeAppSettings(uid)
+                .catch { e ->
+                    if (e is CancellationException) throw e
+                    _uiState.update {
+                        it.copy(cloudSyncStatus = CloudSyncStatus.Error(e.message ?: "Gagal membaca pengaturan cloud"))
+                    }
+                }
+                .collect { remote ->
+                    if (remote != null) {
+                        val cur = _uiState.value
+                        if (cur.themePreference != remote.themePreference) {
+                            repository.profileStore.setThemePreference(remote.themePreference)
+                        }
+                        if (remote.activeProfileId.isNotBlank() && cur.activeProfile.id != remote.activeProfileId) {
+                            repository.profileStore.setActiveProfileId(remote.activeProfileId)
+                        }
+                        if (remote.selectedAgent.isNotBlank() && cur.selectedAgent != remote.selectedAgent) {
+                            repository.profileStore.setSelectedAgent(remote.selectedAgent)
+                        }
+                        if (remote.selectedProviderId.isNotBlank() && remote.selectedModelId.isNotBlank()) {
+                            val currentModel = cur.selectedModel
+                            if (currentModel?.providerID != remote.selectedProviderId ||
+                                currentModel.modelID != remote.selectedModelId
+                            ) {
+                                repository.providerConfigRepository.setSelectedModel(
+                                    remote.selectedProviderId,
+                                    remote.selectedModelId
+                                )
+                            }
+                        }
+                        if (cur.hasCompletedSetup != remote.setupCompleted) {
+                            repository.profileStore.setHasCompletedSetup(remote.setupCompleted)
+                        }
+                        _uiState.update { it.copy(cloudSyncStatus = CloudSyncStatus.Synced()) }
+                    }
+                }
+        }
+
+        viewModelScope.launch {
+            cloudSyncRepository.observeServerProfiles(uid)
+                .catch { e ->
+                    if (e is CancellationException) throw e
+                    _uiState.update {
+                        it.copy(cloudSyncStatus = CloudSyncStatus.Error(e.message ?: "Gagal sinkron profil server"))
+                    }
+                }
+                .collect { remoteProfiles ->
+                    if (remoteProfiles.isNotEmpty()) {
+                        val localProfiles = repository.profilesFlow.first()
+                        val merged = (remoteProfiles + localProfiles.filter { local ->
+                            remoteProfiles.none { it.id == local.id }
+                        })
+                        if (merged != localProfiles) {
+                            repository.profileStore.saveProfiles(merged)
+                        }
+                        _uiState.update { it.copy(cloudSyncStatus = CloudSyncStatus.Synced()) }
+                    }
+                }
+        }
+
+        viewModelScope.launch {
+            cloudSyncRepository.observeProviderAccounts(uid)
+                .catch { e ->
+                    if (e is CancellationException) throw e
+                    _uiState.update {
+                        it.copy(cloudSyncStatus = CloudSyncStatus.Error(e.message ?: "Gagal sinkron provider AI"))
+                    }
+                }
+                .collect { remoteAccounts ->
+                    if (remoteAccounts.isNotEmpty()) {
+                        val currentLocal = repository.providerAccountsFlow.first()
+                        val merged = ProviderCatalogDefaults.mergeWithBuiltIns(remoteAccounts)
+                        val preservedMissingCustoms = currentLocal.filter { local ->
+                            local.isCustom && merged.none { it.id.equals(local.id, ignoreCase = true) }
+                        }
+                        val finalList = merged + preservedMissingCustoms
+                        if (finalList != currentLocal) {
+                            repository.providerConfigRepository.saveProviderAccounts(finalList)
+                        }
+                        _uiState.update { it.copy(cloudSyncStatus = CloudSyncStatus.Synced()) }
+                    }
+                }
+        }
+    }
+
+    fun syncNowToCloud() {
+        if (currentUserId.isNullOrBlank()) return
+        viewModelScope.launch {
+            pushFullConfigToCloudInternal(silent = false)
+        }
+    }
+
+    private suspend fun pushFullConfigToCloudInternal(silent: Boolean) {
+        if (currentUserId.isNullOrBlank()) return
+        _uiState.update { it.copy(cloudSyncStatus = CloudSyncStatus.Syncing) }
+        val settingsResult = pushCurrentAppSettingsToCloud()
+        val profiles = repository.profilesFlow.first()
+        var firstError: Throwable? = settingsResult.exceptionOrNull()
+
+        profiles.forEach { profile ->
+            val res = cloudSyncRepository.saveServerProfile(profile)
+            if (res.isFailure && firstError == null) firstError = res.exceptionOrNull()
+        }
+
+        val accounts = repository.providerAccountsFlow.first()
+        accounts.filter { it.isCustom || it.apiKey.isNotBlank() || it.cachedModels.isNotEmpty() }.forEach { acc ->
+            val res = cloudSyncRepository.saveProviderAccount(acc)
+            if (res.isFailure && firstError == null) firstError = res.exceptionOrNull()
+        }
+
+        if (firstError == null) {
+            _uiState.update { it.copy(cloudSyncStatus = CloudSyncStatus.Synced()) }
+            if (!silent) {
+                _snackbarEvents.tryEmit("Konfigurasi berhasil disinkronkan ke Firebase Cloud")
+            }
+        } else {
+            val errMsg = firstError.message ?: "Sinkronisasi cloud gagal"
+            _uiState.update { it.copy(cloudSyncStatus = CloudSyncStatus.Error(errMsg)) }
+            if (!silent) {
+                _snackbarEvents.tryEmit("Gagal sinkron ke Cloud: $errMsg")
+            }
+        }
+    }
+
+    private suspend fun pushCurrentAppSettingsToCloud(
+        themeOverride: ThemePreference? = null,
+        activeProfileIdOverride: String? = null,
+        agentOverride: String? = null,
+        providerIdOverride: String? = null,
+        modelIdOverride: String? = null,
+        setupCompletedOverride: Boolean? = null
+    ): Result<Unit> {
+        if (currentUserId.isNullOrBlank()) return Result.success(Unit)
+        val state = _uiState.value
+        val activeModel = state.selectedModel
+        return cloudSyncRepository.saveAppSettings(
+            CloudAppSettings(
+                themePreference = themeOverride ?: state.themePreference,
+                activeProfileId = activeProfileIdOverride ?: state.activeProfile.id,
+                selectedAgent = agentOverride ?: state.selectedAgent,
+                selectedProviderId = providerIdOverride ?: activeModel?.providerID ?: state.localProviderConfig.providerId,
+                selectedModelId = modelIdOverride ?: activeModel?.modelID ?: state.localProviderConfig.modelId,
+                setupCompleted = setupCompletedOverride ?: (state.hasCompletedSetup == true)
+            )
+        ).also { res ->
+            res.onSuccess {
+                _uiState.update { it.copy(cloudSyncStatus = CloudSyncStatus.Synced()) }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(cloudSyncStatus = CloudSyncStatus.Error(err.message ?: "Gagal menyimpan ke Cloud"))
                 }
             }
         }
@@ -987,18 +1216,21 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
     fun selectAgent(agentName: String) {
         viewModelScope.launch {
             repository.profileStore.setSelectedAgent(agentName)
+            pushCurrentAppSettingsToCloud(agentOverride = agentName)
         }
     }
 
     fun selectModel(providerId: String, modelId: String) {
         viewModelScope.launch {
             repository.providerConfigRepository.setSelectedModel(providerId, modelId)
+            pushCurrentAppSettingsToCloud(providerIdOverride = providerId, modelIdOverride = modelId)
         }
     }
 
     fun setThemePreference(preference: ThemePreference) {
         viewModelScope.launch {
             repository.profileStore.setThemePreference(preference)
+            pushCurrentAppSettingsToCloud(themeOverride = preference)
         }
     }
 
@@ -1011,6 +1243,10 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
             if (setActive) {
                 repository.profileStore.setActiveProfileId(profile.id)
             }
+            cloudSyncRepository.saveServerProfile(profile)
+            if (setActive) {
+                pushCurrentAppSettingsToCloud(activeProfileIdOverride = profile.id)
+            }
             _snackbarEvents.tryEmit("Profil server '${profile.name}' disimpan")
         }
     }
@@ -1018,6 +1254,7 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
     fun activateServerProfile(profileId: String) {
         viewModelScope.launch {
             repository.profileStore.setActiveProfileId(profileId)
+            pushCurrentAppSettingsToCloud(activeProfileIdOverride = profileId)
         }
     }
 
@@ -1030,8 +1267,13 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
             }
             val updated = current.filterNot { it.id == profileId }
             repository.profileStore.saveProfiles(updated)
-            if (_uiState.value.activeProfile.id == profileId) {
+            val wasActive = _uiState.value.activeProfile.id == profileId
+            if (wasActive) {
                 repository.profileStore.setActiveProfileId(updated.first().id)
+            }
+            cloudSyncRepository.deleteServerProfile(profileId)
+            if (wasActive) {
+                pushCurrentAppSettingsToCloud(activeProfileIdOverride = updated.first().id)
             }
             _snackbarEvents.tryEmit("Profil server dihapus")
         }
@@ -1166,6 +1408,7 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             repository.profileStore.setHasCompletedSetup(true)
             _uiState.update { it.copy(showSetupWizardManual = false, hasCompletedSetup = true) }
+            pushCurrentAppSettingsToCloud(setupCompletedOverride = true)
         }
     }
 
@@ -1190,6 +1433,15 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
             when (val res = repository.setProviderApiKey(profile, cleanProvider, cleanKey, modelId, customBaseUrl, apiFormat)) {
                 is ApiOutcome.Success -> {
                     _uiState.update { it.copy(isSavingApiKey = false) }
+                    val updatedAccount = repository.providerAccountsFlow.first()
+                        .firstOrNull { it.id.equals(cleanProvider, ignoreCase = true) }
+                    if (updatedAccount != null) {
+                        cloudSyncRepository.saveProviderAccount(updatedAccount)
+                        pushCurrentAppSettingsToCloud(
+                            providerIdOverride = updatedAccount.id,
+                            modelIdOverride = modelId?.takeIf { it.isNotBlank() } ?: updatedAccount.defaultModelId
+                        )
+                    }
                     refreshServerMetadata(profile)
                     val targetLabel = if (profile.isLocalAndroid) "Runtime Lokal Android" else "server OpenCode"
                     _snackbarEvents.tryEmit("API Key '$cleanProvider' berhasil disimpan ke $targetLabel")
@@ -1213,10 +1465,21 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
             when (val res = repository.saveProviderAccount(account, activate, profile)) {
                 is ApiOutcome.Success -> {
                     _uiState.update { it.copy(isSavingApiKey = false) }
+                    val savedId = account.id.trim().lowercase()
+                    val persisted = repository.providerAccountsFlow.first()
+                        .firstOrNull { it.id.equals(savedId, ignoreCase = true) }
+                        ?: account.copy(id = savedId)
+                    cloudSyncRepository.saveProviderAccount(persisted)
+                    if (activate) {
+                        pushCurrentAppSettingsToCloud(
+                            providerIdOverride = persisted.id,
+                            modelIdOverride = persisted.defaultModelId
+                        )
+                    }
                     refreshServerMetadata(profile)
                     _snackbarEvents.tryEmit("Provider '${account.name.ifBlank { account.id }}' disimpan")
                     if (autoFetchModels) {
-                        refreshProviderModels(account.id.trim().lowercase(), silentSuccess = true)
+                        refreshProviderModels(savedId, silentSuccess = true)
                     }
                 }
                 is ApiOutcome.Failure -> {
@@ -1230,6 +1493,8 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
     fun deleteCustomProvider(providerId: String) {
         viewModelScope.launch {
             repository.deleteCustomProviderAccount(providerId)
+            cloudSyncRepository.deleteProviderAccount(providerId)
+            pushCurrentAppSettingsToCloud()
             refreshServerMetadata(_uiState.value.activeProfile)
             _snackbarEvents.tryEmit("Provider custom dihapus")
         }
@@ -1242,6 +1507,12 @@ class OpenCodeViewModel(application: Application) : AndroidViewModel(application
             when (val res = repository.refreshProviderModels(providerId)) {
                 is ApiOutcome.Success -> {
                     _uiState.update { it.copy(isRefreshingModels = false) }
+                    val cleanPid = providerId?.trim()?.lowercase()
+                    if (cleanPid != null) {
+                        repository.providerAccountsFlow.first()
+                            .firstOrNull { it.id.equals(cleanPid, ignoreCase = true) }
+                            ?.let { cloudSyncRepository.saveProviderAccount(it) }
+                    }
                     refreshServerMetadata(profile)
                     if (!silentSuccess) {
                         if (res.data > 0) {

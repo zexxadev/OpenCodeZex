@@ -24,10 +24,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Dns
@@ -37,6 +39,7 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.RocketLaunch
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -79,6 +82,7 @@ import com.example.ui.components.ThemeToggleButton
 import com.example.ui.theme.LocalOpenCodeColors
 import com.example.ui.theme.MonoCodeStyle
 import com.example.ui.theme.ThemePreference
+import com.example.ui.viewmodel.CloudSyncStatus
 import com.example.ui.viewmodel.ConnectionState
 import com.example.ui.viewmodel.OpenCodeUiState
 
@@ -104,6 +108,8 @@ fun ServersScreen(
     onDeleteCustomProvider: (String) -> Unit = {},
     onRefreshModels: (String?) -> Unit = {},
     onSelectModel: (String, String) -> Unit = { _, _ -> },
+    onSyncCloud: () -> Unit = {},
+    onSignOut: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var editingProfile by remember { mutableStateOf<ServerProfile?>(null) }
@@ -200,6 +206,19 @@ fun ServersScreen(
                     onOpenApiKeyDialog = { showApiKeyDialog = true },
                     onOpenSetupWizard = onOpenSetupWizard
                 )
+            }
+
+            // Firebase Cloud Account & Security Card
+            if (!state.authenticatedUserId.isNullOrBlank()) {
+                item {
+                    CloudAccountSecurityCard(
+                        userName = state.authenticatedUserName,
+                        userEmail = state.authenticatedUserEmail,
+                        syncStatus = state.cloudSyncStatus,
+                        onSyncCloud = onSyncCloud,
+                        onSignOut = onSignOut
+                    )
+                }
             }
 
             // Theme selector card (Gelap, Terang, Material Glass, Miuix, Sistem)
@@ -429,6 +448,117 @@ fun ServersScreen(
                 onSaveProviderApiKey(providerId, key, modelId, customBaseUrl)
             }
         )
+    }
+}
+
+@Composable
+private fun CloudAccountSecurityCard(
+    userName: String?,
+    userEmail: String?,
+    syncStatus: CloudSyncStatus,
+    onSyncCloud: () -> Unit,
+    onSignOut: () -> Unit
+) {
+    val semanticColors = LocalOpenCodeColors.current
+    val (statusLabel, statusColor) = when (syncStatus) {
+        is CloudSyncStatus.Synced -> "Tersinkronisasi ke Firebase Cloud" to semanticColors.success
+        CloudSyncStatus.Syncing -> "Menyinkronkan konfigurasi…" to MaterialTheme.colorScheme.primary
+        is CloudSyncStatus.Error -> "Gagal sinkron: ${syncStatus.message}" to MaterialTheme.colorScheme.error
+        CloudSyncStatus.Idle -> "Sinkronisasi Cloud Siap" to MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.VerifiedUser,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Column {
+                        Text(
+                            text = userName?.takeIf { it.isNotBlank() } ?: "Akun Google Terhubung",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (!userEmail.isNullOrBlank()) {
+                            Text(
+                                text = userEmail,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+                Icon(
+                    imageVector = Icons.Rounded.CloudSync,
+                    contentDescription = "Status Cloud Sync",
+                    tint = statusColor
+                )
+            }
+
+            Text(
+                text = statusLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = statusColor
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onSyncCloud,
+                    enabled = syncStatus != CloudSyncStatus.Syncing,
+                    modifier = Modifier
+                        .weight(1f)
+                        .minimumInteractiveComponentSize()
+                        .testTag("sync_cloud_button")
+                ) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Sinkronkan", maxLines = 1)
+                }
+
+                OutlinedButton(
+                    onClick = onSignOut,
+                    modifier = Modifier
+                        .weight(1f)
+                        .minimumInteractiveComponentSize()
+                        .testTag("sign_out_button")
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Rounded.Logout,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Keluar", maxLines = 1)
+                }
+            }
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 {
-  "name": "OpenCode",
+  "name": "OpenCodeZex",
   "description": "Klien Android terintegrasi OpenCode Server untuk mengelola sesi agen coding, live SSE streaming, diff patch, dan file workspace.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

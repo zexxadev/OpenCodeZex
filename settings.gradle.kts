@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "OpenCode"
+rootProject.name = "OpenCodeZex"
 
 include(":app")

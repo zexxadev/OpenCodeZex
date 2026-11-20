@@ -1,9 +1,12 @@
 package com.example
 
+import android.app.Application
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -35,10 +38,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -49,54 +58,183 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.data.firebase.FirestoreConfigRepository
+import com.example.data.firebase.GoogleAuthHelper
+import com.example.data.firebase.authStateFlow
 import com.example.data.model.SessionRunStatus
+import com.example.data.preferences.ServerProfileStore
 import com.example.ui.navigation.FilesRoute
 import com.example.ui.navigation.ServersRoute
 import com.example.ui.navigation.SessionsRoute
 import com.example.ui.navigation.WorkspaceRoute
+import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.FilesScreen
 import com.example.ui.screens.ServersScreen
 import com.example.ui.screens.SessionsScreen
 import com.example.ui.screens.SetupWizardScreen
+import com.example.ui.screens.SplashPhase
+import com.example.ui.screens.SplashScreen
+import com.example.ui.screens.StartupSessionCoordinator
 import com.example.ui.screens.WorkspaceScreen
 import com.example.ui.theme.LocalOpenCodeColors
 import com.example.ui.theme.OpenCodeTheme
+import com.example.ui.theme.ThemePreference
 import com.example.ui.viewmodel.OpenCodeViewModel
+import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.auth
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+
+private sealed interface StartupStage {
+    data object Splash : StartupStage
+    data object Auth : StartupStage
+    class Authenticated(val user: com.google.firebase.auth.FirebaseUser) : StartupStage {
+        override fun equals(other: Any?): Boolean =
+            other is Authenticated && other.user.uid == user.uid
+
+        override fun hashCode(): Int = user.uid.hashCode()
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (FirebaseApp.getApps(applicationContext).isEmpty()) {
+            FirebaseApp.initializeApp(applicationContext)
+        }
         setContent {
-            val viewModel: OpenCodeViewModel = viewModel()
-            val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+            val context = LocalContext.current
+            val application = context.applicationContext as Application
+            val coroutineScope = rememberCoroutineScope()
 
-            OpenCodeTheme(themePreference = uiState.themePreference) {
-                when {
-                    uiState.hasCompletedSetup == null -> {
-                        Surface(
-                            modifier = Modifier.fillMaxSize(),
-                            color = MaterialTheme.colorScheme.background
-                        ) {}
+            val preAuthProfileStore = remember {
+                ServerProfileStore(application, Json { ignoreUnknownKeys = true; isLenient = true })
+            }
+            val localThemePreference by preAuthProfileStore.themePreferenceFlow
+                .collectAsStateWithLifecycle(initialValue = ThemePreference.DARK)
+
+            val currentUser by remember { Firebase.auth.authStateFlow() }
+                .collectAsStateWithLifecycle(initialValue = Firebase.auth.currentUser)
+
+            var isSplashFinished by rememberSaveable { mutableStateOf(false) }
+            var splashPhase by remember { mutableStateOf(SplashPhase.INITIALIZING_FIREBASE) }
+            var isSigningIn by remember { mutableStateOf(false) }
+            var authErrorMessage by remember { mutableStateOf<String?>(null) }
+
+            LaunchedEffect(Unit) {
+                if (!isSplashFinished) {
+                    StartupSessionCoordinator.initializeAndCheckSession(context) { phase ->
+                        splashPhase = phase
                     }
-                    uiState.shouldShowSetupWizard -> {
-                        SetupWizardScreen(
-                            state = uiState,
-                            canDismissWithBack = uiState.showSetupWizardManual,
-                            snackbarEvents = viewModel.snackbarEvents,
-                            onRefreshTermux = viewModel::refreshTermuxStatus,
-                            onSaveProfile = { profile ->
-                                viewModel.saveServerProfile(profile, setActive = true)
-                            },
-                            onTestConnection = { viewModel.connectToActiveServer() },
-                            onSaveProviderApiKey = viewModel::saveProviderApiKey,
-                            onSaveProviderAccount = { viewModel.saveProviderAccount(it) },
-                            onRefreshModels = { viewModel.refreshProviderModels(it) },
-                            onFinishSetup = viewModel::completeSetupWizard
-                        )
+                    isSplashFinished = true
+                }
+            }
+
+            val startupStage: StartupStage = when {
+                !isSplashFinished -> StartupStage.Splash
+                currentUser == null -> StartupStage.Auth
+                else -> StartupStage.Authenticated(currentUser!!)
+            }
+
+            Crossfade(
+                targetState = startupStage,
+                animationSpec = tween(durationMillis = 260),
+                label = "startup_stage_crossfade"
+            ) { stage ->
+                when (stage) {
+                    StartupStage.Splash -> {
+                        OpenCodeTheme(themePreference = localThemePreference) {
+                            SplashScreen(phase = splashPhase)
+                        }
                     }
-                    else -> {
-                        OpenCodeAppShell(viewModel = viewModel)
+
+                    StartupStage.Auth -> {
+                        OpenCodeTheme(themePreference = localThemePreference) {
+                            AuthScreen(
+                                isSigningIn = isSigningIn,
+                                errorMessage = authErrorMessage,
+                                themePreference = localThemePreference,
+                                onThemeChange = { pref ->
+                                    coroutineScope.launch {
+                                        preAuthProfileStore.setThemePreference(pref)
+                                    }
+                                },
+                                onGoogleSignInClick = {
+                                    if (!isSigningIn) {
+                                        isSigningIn = true
+                                        authErrorMessage = null
+                                        coroutineScope.launch {
+                                            val result = GoogleAuthHelper.signInWithGoogle(context)
+                                            isSigningIn = false
+                                            result.onFailure { err ->
+                                                authErrorMessage = err.localizedMessage
+                                                    ?: "Gagal masuk dengan akun Google. Silakan coba lagi."
+                                            }
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    is StartupStage.Authenticated -> {
+                        val signedInUser = stage.user
+                        key(signedInUser.uid) {
+                            val cloudRepository = remember(signedInUser.uid) {
+                                FirestoreConfigRepository(application)
+                            }
+                            LaunchedEffect(signedInUser.uid) {
+                                cloudRepository.upsertUserProfile(signedInUser)
+                            }
+
+                            val viewModel: OpenCodeViewModel = viewModel(
+                                key = "opencode_vm_${signedInUser.uid}",
+                                factory = OpenCodeViewModel.provideFactory(
+                                    application = application,
+                                    userId = signedInUser.uid,
+                                    email = signedInUser.email,
+                                    displayName = signedInUser.displayName,
+                                    cloudSyncRepository = cloudRepository
+                                )
+                            )
+                            val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+                            OpenCodeTheme(themePreference = uiState.themePreference) {
+                                when {
+                                    uiState.hasCompletedSetup == null -> {
+                                        SplashScreen(phase = SplashPhase.SESSION_FOUND)
+                                    }
+                                    uiState.shouldShowSetupWizard -> {
+                                        SetupWizardScreen(
+                                            state = uiState,
+                                            canDismissWithBack = uiState.showSetupWizardManual,
+                                            snackbarEvents = viewModel.snackbarEvents,
+                                            onRefreshTermux = viewModel::refreshTermuxStatus,
+                                            onSaveProfile = { profile ->
+                                                viewModel.saveServerProfile(profile, setActive = true)
+                                            },
+                                            onTestConnection = { viewModel.connectToActiveServer() },
+                                            onSaveProviderApiKey = viewModel::saveProviderApiKey,
+                                            onSaveProviderAccount = { viewModel.saveProviderAccount(it) },
+                                            onRefreshModels = { viewModel.refreshProviderModels(it) },
+                                            onFinishSetup = viewModel::completeSetupWizard
+                                        )
+                                    }
+                                    else -> {
+                                        OpenCodeAppShell(
+                                            viewModel = viewModel,
+                                            onSignOut = {
+                                                coroutineScope.launch {
+                                                    GoogleAuthHelper.signOut(context)
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -113,7 +251,10 @@ private data class TopNavItem(
 )
 
 @Composable
-private fun OpenCodeAppShell(viewModel: OpenCodeViewModel) {
+private fun OpenCodeAppShell(
+    viewModel: OpenCodeViewModel,
+    onSignOut: () -> Unit
+) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -336,7 +477,9 @@ private fun OpenCodeAppShell(viewModel: OpenCodeViewModel) {
                             onSaveProviderAccount = { viewModel.saveProviderAccount(it) },
                             onDeleteCustomProvider = viewModel::deleteCustomProvider,
                             onRefreshModels = { viewModel.refreshProviderModels(it) },
-                            onSelectModel = viewModel::selectModel
+                            onSelectModel = viewModel::selectModel,
+                            onSyncCloud = viewModel::syncNowToCloud,
+                            onSignOut = onSignOut
                         )
                     }
                 }

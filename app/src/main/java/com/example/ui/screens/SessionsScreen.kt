@@ -257,7 +257,7 @@ private fun SessionsHeaderBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    text = "OpenCode",
+                    text = "OpenCodeZex",
                     style = MaterialTheme.typography.headlineMedium,
                     color = MaterialTheme.colorScheme.onBackground
                 )
